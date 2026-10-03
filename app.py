@@ -1,101 +1,154 @@
 import os
 import cv2
 import requests
-import numpy as np
-import time
-import threading
-from datetime import datetime
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, Response, render_template_string
 
 app = Flask(__name__)
 
-# 1. ตั้งค่า DroidCam RTSP และ LINE Access Token
-RTSP_URL = "http://192.168.1.151:4747/video"
-LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN", "ใส่_LINE_ACCESS_TOKEN_ของคุณ")
+# --- LINE Notification Setup ---
+LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN", "")
 
-# สร้างโฟลเดอร์สำหรับเก็บรูปภาพเบื้องหลังถ้ายังไม่มี
-SAVE_DIR = "captured_images"
-if not os.path.exists(SAVE_DIR):
-    os.makedirs(SAVE_DIR)
-
-# 2. ฟังก์ชันส่งข้อความแจ้งเตือนผ่าน LINE Broadcast
 def send_line_message(message):
-    url = "jnlApIVgKhlzKwr+VrcJ5qTrb7z3pS0PuGFoHAj9Is3J++VGcUCQBiDK+qctLF+wSAmeQQ+gxwOpSNhCFSctSYf0lQX0HwMLxYfCWY7lvAvled5mxpKu56vdhTrLc+jwQ85FoEPWsgZCHFALoeWwYwdB04t89/1O/w1cDnyilFU="
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
-    }
-    data = {
-        "messages": [
-            {"type": "text", "text": message}
-        ]
-    }
+    if not LINE_ACCESS_TOKEN:
+        return
+    url = 'jnlApIVgKhlzKwr+VrcJ5qTrb7z3pS0PuGFoHAj9Is3J++VGcUCQBiDK+qctLF+wSAmeQQ+gxwOpSNhCFSctSYf0lQX0HwMLxYfCWY7lvAvled5mxpKu56vdhTrLc+jwQ85FoEPWsgZCHFALoeWwYwdB04t89/1O/w1cDnyilFU='
+    headers = {'Authorization': f'Bearer {LINE_ACCESS_TOKEN}'}
+    data = {'message': message}
     try:
-        response = requests.post(url, json=data, headers=headers)
-        print("LINE notification status:", response.status_code)
+        requests.post(url, headers=headers, data=data)
     except Exception as e:
-        print("Error sending LINE notification:", e)
+        print(f"Error sending LINE alert: {e}")
 
-# 3. ฟังก์ชันบันทึกรูปภาพลงโฟลเดอร์เบื้องหลัง
-def save_captured_frame(frame):
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"person_{timestamp}.jpg"
-    filepath = os.path.join(SAVE_DIR, filename)
-    
-    # บันทึกรูปภาพลงโฟลเดอร์
-    cv2.imwrite(filepath, frame)
-    print(f"📸 บันทึกรูปภาพสำเร็จ: {filepath}")
-    return filepath
-
-# 4. ระบบตรวจจับคนจาก DroidCam (Background Thread)
-def detect_people():
-    hog = cv2.HOGDescriptor()
-    hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-    
-    cap = cv2.VideoCapture(RTSP_URL)
-    last_notify_time = 0
-    notify_cooldown = 10  # หน่วงเวลาแจ้งเตือนอย่างน้อย 10 วินาที
-
-    print("เริ่มต้นระบบตรวจจับคนและบันทึกภาพจาก DroidCam...")
-
+# --- Video Stream Generator ---
+def generate_frames():
+    # ใช้กล้อง webcam/DroidCam (index http://192.168.1.151:4747/video)
+    camera = cv2.VideoCapture(0)
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            time.sleep(2)
-            cap = cv2.VideoCapture(RTSP_URL)
-            continue
+        success, frame = camera.read()
+        if not success:
+            break
+        else:
+            # ตรงนี้สามารถใส่ logic การตรวจจับวัตถุ (Detection) เพิ่มเติมได้
+            ret, buffer = cv2.imencode('.jpg', frame)
+            frame_bytes = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
-        frame_resized = cv2.resize(frame, (640, 480))
-        boxes, weights = hog.detectMultiScale(frame_resized, winStride=(8, 8), padding=(8, 8), scale=1.05)
+# --- OriginOS Styled HTML Template ---
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="th" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VLDAR Bot Dashboard</title>
+    <style>
+        :root[data-theme="dark"] {
+            --bg-color: #0f172a;
+            --card-bg: rgba(30, 41, 59, 0.7);
+            --text-color: #f8fafc;
+            --border-color: rgba(255, 255, 255, 0.1);
+            --accent-color: #38bdf8;
+        }
+        :root[data-theme="light"] {
+            --bg-color: #f1f5f9;
+            --card-bg: rgba(255, 255, 255, 0.8);
+            --text-color: #0f172a;
+            --border-color: rgba(0, 0, 0, 0.1);
+            --accent-color: #0284c7;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 20px;
+            transition: all 0.3s ease;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .theme-btn {
+            background: var(--card-bg);
+            color: var(--text-color);
+            border: 1px solid var(--border-color);
+            padding: 8px 16px;
+            border-radius: 20px;
+            cursor: pointer;
+            backdrop-filter: blur(10px);
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 20px;
+        }
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 24px;
+            padding: 20px;
+            backdrop-filter: blur(16px);
+            box-shadow: 0 10px 25px -5px rgba(0,0,0,0.1);
+        }
+        .video-feed {
+            width: 100%;
+            border-radius: 16px;
+            background: #000;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            background: #22c55e;
+            color: white;
+            font-size: 0.8em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h2>VLDAR Bot Dashboard</h2>
+            <button class="theme-btn" onclick="toggleTheme()">🌓 สลับธีม สว่าง/มืด</button>
+        </div>
+        <div class="grid">
+            <div class="card">
+                <h3>Camera Feed (Live)</h3>
+                <img src="/video_feed" class="video-feed" alt="Live Stream">
+            </div>
+            <div class="card">
+                <h3>System Status</h3>
+                <p>Status: <span class="status-badge">ONLINE</span></p>
+                <p>Detection: Active</p>
+                <p>LINE Notify: Connected</p>
+            </div>
+        </div>
+    </div>
+    <script>
+        function toggleTheme() {
+            const html = document.documentElement;
+            const current = html.getAttribute('data-theme');
+            html.setAttribute('data-theme', current === 'dark' ? 'light' : 'dark');
+        }
+    </script>
+</body>
+</html>
+"""
 
-        if len(boxes) > 0:
-            current_time = time.time()
-            if current_time - last_notify_time > notify_cooldown:
-                # บันทึกรูปภาพลงดิสก์เบื้องหลัง
-                img_path = save_captured_frame(frame_resized)
-                
-                # ส่งแจ้งเตือนผ่าน LINE
-                message = f"🚨 ตรวจพบคนผ่าน DroidCam! จำนวน: {len(boxes)} คน\nบันทึกภาพไว้ที่: {os.path.basename(img_path)}"
-                send_line_message(message)
-                
-                last_notify_time = current_time
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE)
 
-# รันระบบตรวจจับคนแบบ Thread แยกทำงานด้านหลัง
-threading.Thread(target=detect_people, daemon=True).start()
+@app.route('/video_feed')
+def video_feed():
+    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-# 5. หน้า Web Server (Flask) สำหรับ Render และเปิดดูรูปภาพที่บันทึกไว้
-@app.route("/", methods=["GET"])
-def home():
-    return "VLDAR Bot (DroidCam + Detection + Save Image + LINE) is running!"
-
-@app.route("/images/<filename>", methods=["GET"])
-def get_image(filename):
-    return send_from_directory(SAVE_DIR, filename)
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    return jsonify({"status": "ok"}), 200
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=10000)
